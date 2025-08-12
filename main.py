@@ -2,8 +2,13 @@ from fastapi import FastAPI, Request
 import requests
 import os
 
+# Load environment variables
 TOKEN = os.getenv("BOT_TOKEN")  # Bot token from environment variable
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
+
+# Safety check to avoid silent failures
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is not set. Please set it as an environment variable.")
 
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
 
