@@ -1,138 +1,52 @@
 import os
-import datetime
-import pytz
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, ContextTypes, filters
-from fastapi import FastAPI
-from threading import Thread
-import uvicorn
+import asyncio
+from telegram import Bot, Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# =========================
-# CONFIG
-# =========================
-TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002825102359")
+# Get environment variables
+TOKEN = os.getenv("BOT_TOKEN")  # Your bot token from Render environment variables
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # Your channel ID (e.g., "@mychannel" or "-1001234567890")
 
 if not TOKEN:
-    raise ValueError("BOT_TOKEN is missing!")
+    raise ValueError("BOT_TOKEN is missing! Set it in Render environment variables.")
 
-local_tz = pytz.timezone("Asia/Singapore")
+# Keyboard layout (same as your original)
+keyboard = [["Option 1", "Option 2", "Option 3"]]
+reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
 
-# =========================
-# LOGGING CONFIG
-# =========================
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# =========================
-# FASTAPI SERVER
-# =========================
-fastapi_app = FastAPI()
-
-@fastapi_app.get("/")
-def home():
-    return {"status": "Bot is running!"}
-
-@fastapi_app.get("/ping")
-def ping():
-    return {"ping": "I'm alive"}
-
-def run_fastapi():
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
-
-# =========================
-# KEYBOARD FUNCTION
-# =========================
-def get_compliance_keyboard(selected):
-    options = [
-        "Tiada Suntikan Anti-Tifoid",
-        "Tiada Sijil Pengendalian Makanan",
-        "Tiada Apron",
-        "Tiada Kasut",
-        "Tiada Topi",
-        "Tiada lesen/permit"
-    ]
-    kb = [[InlineKeyboardButton(opt + (" ✔" if opt in selected else ""), callback_data=opt)] for opt in options]
-    kb.append([InlineKeyboardButton("Hantar", callback_data="Hantar")])
-    return InlineKeyboardMarkup(kb)
-
-# =========================
-# HANDLERS
-# =========================
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    photo = update.message.photo[-1].file_id
-    caption = update.message.caption or "No remarks"
-    timestamp = datetime.datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-    context.user_data['pending_log'] = {
-        'file_id': photo,
-        'caption': caption,
-        'timestamp': timestamp,
-        'nick': user.first_name,
-        'selections': []
-    }
-
-    logger.info(f"📸 Photo received from {user.first_name} at {timestamp} | Caption: {caption}")
-
+# Start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Sila pilih sebab ketidakpatuhan (boleh pilih lebih dari satu), kemudian tekan Hantar:",
-        reply_markup=get_compliance_keyboard([])
+        "Hello! Send me a photo and I'll send it to the channel.",
+        reply_markup=reply_markup
     )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    pend = context.user_data.get('pending_log', {})
-    sels = pend.get('selections', [])
+# Handle photo messages
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
+        return
 
-    logger.info(f"🔘 Button pressed: {data} | Current selections: {sels}")
+    caption = update.message.caption or ""
+    photo = update.message.photo[-1].file_id
 
-    if data == "Hantar":
-        if not sels:
-            await query.edit_message_text("Tiada sebab dipilih. Sila pilih sekurang-kurangnya satu.")
-            logger.warning("⚠️ Attempted to send with no selections.")
-            return
+    # Forward photo to the channel
+    await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=caption)
 
-        text = (
-            f"🕒 {pend['timestamp']}\n"
-            f"👤 {pend['nick']}\n"
-            f"💬 Catatan: {pend['caption']}\n"
-            f"❗Sebab Ketidakpatuhan: {', '.join(sels)}"
-        )
+    # Reply to the user with the keyboard
+    await update.message.reply_text(
+        "Photo received! Choose an option:",
+        reply_markup=reply_markup
+    )
 
-        await context.bot.send_photo(chat_id=CHANNEL_ID, photo=pend['file_id'], caption=text)
-        await query.edit_message_text("Log direkodkan ✅")
-        logger.info(f"✅ Log sent to channel {CHANNEL_ID} from {pend['nick']}")
-        context.user_data.pop('pending_log', None)
-    else:
-        if data in sels:
-            sels.remove(data)
-        else:
-            sels.append(data)
+async def main():
+    application = Application.builder().token(TOKEN).build()
 
-        pend['selections'] = sels
-        await query.edit_message_reply_markup(reply_markup=get_compliance_keyboard(sels))
-
-# =========================
-# BOT RUNNER
-# =========================
-def main():
-    # Start FastAPI
-    Thread(target=run_fastapi, daemon=True).start()
-
-    # Start polling bot
-    application = ApplicationBuilder().token(TOKEN).build()
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(CallbackQueryHandler(button_callback))
 
-    logger.info("🚀 Bot started and polling for updates...")
-    application.run_polling()
+    # Start polling (no webhook needed)
+    await application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
