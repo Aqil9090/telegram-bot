@@ -1,28 +1,52 @@
 import os
 import datetime
 import pytz
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CallbackQueryHandler, MessageHandler, ContextTypes, filters
-from fastapi import FastAPI, Request
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from fastapi import FastAPI
+from threading import Thread
 import uvicorn
 
-# Environment variables
+# =========================
+# CONFIG
+# =========================
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002825102359")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "mysecret")
-RENDER_URL = os.getenv("RENDER_URL")  # e.g. https://mybot.onrender.com
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN is missing!")
 
-# Timezone
 local_tz = pytz.timezone("Asia/Singapore")
 
-# FastAPI app
-fastapi_app = FastAPI()
-bot_app = Application.builder().token(TOKEN).build()
+# =========================
+# LOGGING CONFIG
+# =========================
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# Keyboard function
+# =========================
+# FASTAPI SERVER
+# =========================
+fastapi_app = FastAPI()
+
+@fastapi_app.get("/")
+def home():
+    return {"status": "Bot is running!"}
+
+@fastapi_app.get("/ping")
+def ping():
+    return {"ping": "I'm alive"}
+
+def run_fastapi():
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
+
+# =========================
+# KEYBOARD FUNCTION
+# =========================
 def get_compliance_keyboard(selected):
     options = [
         "Tiada Suntikan Anti-Tifoid",
@@ -36,7 +60,9 @@ def get_compliance_keyboard(selected):
     kb.append([InlineKeyboardButton("Hantar", callback_data="Hantar")])
     return InlineKeyboardMarkup(kb)
 
-# Handle photo messages
+# =========================
+# HANDLERS
+# =========================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     photo = update.message.photo[-1].file_id
@@ -51,12 +77,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'selections': []
     }
 
+    logger.info(f"📸 Photo received from {user.first_name} at {timestamp} | Caption: {caption}")
+
     await update.message.reply_text(
         "Sila pilih sebab ketidakpatuhan (boleh pilih lebih dari satu), kemudian tekan Hantar:",
         reply_markup=get_compliance_keyboard([])
     )
 
-# Handle button presses
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -64,9 +91,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pend = context.user_data.get('pending_log', {})
     sels = pend.get('selections', [])
 
+    logger.info(f"🔘 Button pressed: {data} | Current selections: {sels}")
+
     if data == "Hantar":
         if not sels:
             await query.edit_message_text("Tiada sebab dipilih. Sila pilih sekurang-kurangnya satu.")
+            logger.warning("⚠️ Attempted to send with no selections.")
             return
 
         text = (
@@ -78,6 +108,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_photo(chat_id=CHANNEL_ID, photo=pend['file_id'], caption=text)
         await query.edit_message_text("Log direkodkan ✅")
+        logger.info(f"✅ Log sent to channel {CHANNEL_ID} from {pend['nick']}")
         context.user_data.pop('pending_log', None)
     else:
         if data in sels:
@@ -88,29 +119,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pend['selections'] = sels
         await query.edit_message_reply_markup(reply_markup=get_compliance_keyboard(sels))
 
-# Register handlers
-bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-bot_app.add_handler(CallbackQueryHandler(button_callback))
+# =========================
+# BOT RUNNER
+# =========================
+def main():
+    # Start FastAPI
+    Thread(target=run_fastapi, daemon=True).start()
 
-# Webhook endpoint
-@fastapi_app.post(f"/webhook/{WEBHOOK_SECRET}")
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.process_update(update)
-    return {"status": "ok"}
+    # Start polling bot
+    application = ApplicationBuilder().token(TOKEN).build()
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(CallbackQueryHandler(button_callback))
 
-# Root endpoint
-@fastapi_app.get("/")
-async def home():
-    return {"status": "Bot is running with webhook!"}
-
-# Startup event → set webhook
-@fastapi_app.on_event("startup")
-async def on_startup():
-    webhook_url = f"{RENDER_URL}/webhook/{WEBHOOK_SECRET}"
-    await bot_app.bot.set_webhook(webhook_url)
-    print(f"✅ Webhook set to {webhook_url}")
+    logger.info("🚀 Bot started and polling for updates...")
+    application.run_polling()
 
 if __name__ == "__main__":
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
+    main()
